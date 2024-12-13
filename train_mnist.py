@@ -86,7 +86,8 @@ def main(args):
         for j,(image,target) in enumerate(train_dataloader):
             noise=torch.randn_like(image).to(device)
             image=image.to(device)
-            pred=model(image,noise)
+            target=target.to(device)
+            pred=model(image,noise,target)
             loss=loss_fn(pred,noise)
             loss.backward()
             optimizer.step()
@@ -105,7 +106,7 @@ def main(args):
         torch.save(ckpt,"results/steps_{:0>8}.pt".format(global_steps))
 
         model_ema.eval()
-        samples=model_ema.module.sampling(args.n_samples,clipped_reverse_diffusion=not args.no_clip,device=device)
+        samples=model_ema.module.sampling(args.n_samples, samples_target = [0,1,2,3,4,5] * 6,clipped_reverse_diffusion=not args.no_clip,device=device)
         save_image(samples,"results/steps_{:0>8}.png".format(global_steps),nrow=int(math.sqrt(args.n_samples)))
 
 if __name__=="__main__":

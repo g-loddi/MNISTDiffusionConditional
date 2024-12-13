@@ -82,40 +82,73 @@ class TimeMLP(nn.Module):
   
         return self.act(x)
     
+
+class LabelMLP(nn.Module):
+    '''
+    naive introduce label information to feature maps with mlp and add shortcut
+    '''
+    def __init__(self,embedding_dim,hidden_dim,out_dim):
+        super().__init__()
+        self.mlp=nn.Sequential(nn.Linear(embedding_dim,hidden_dim),
+                                nn.SiLU(),
+                               nn.Linear(hidden_dim,out_dim))
+        self.act=nn.SiLU()
+    def forward(self,x,label):
+        label_emb=self.mlp(label).unsqueeze(-1).unsqueeze(-1)
+        x=x+label_emb
+  
+        return self.act(x)
+    
 class EncoderBlock(nn.Module):
-    def __init__(self,in_channels,out_channels,time_embedding_dim):
+    def __init__(self,in_channels,out_channels,time_embedding_dim, label_embedding_dim):
         super().__init__()
         self.conv0=nn.Sequential(*[ResidualBottleneck(in_channels,in_channels) for i in range(3)],
                                     ResidualBottleneck(in_channels,out_channels//2))
 
         self.time_mlp=TimeMLP(embedding_dim=time_embedding_dim,hidden_dim=out_channels,out_dim=out_channels//2)
+        self.label_mlp=LabelMLP(embedding_dim=label_embedding_dim,hidden_dim=out_channels,out_dim=out_channels//2)
         self.conv1=ResidualDownsample(out_channels//2,out_channels)
     
-    def forward(self,x,t=None):
+    def forward(self,x,t=None, label=None):
         x_shortcut=self.conv0(x)
+
         if t is not None:
-            x=self.time_mlp(x_shortcut,t)
-        x=self.conv1(x)
+            x1=self.time_mlp(x_shortcut,t)
+        else:
+            x1=x
+        if label is not None:
+            x2=self.label_mlp(x_shortcut,label)
+        else:
+            x2=torch.zeros_like(x)
+
+        x=self.conv1(x1+x2)
 
         return [x,x_shortcut]
         
 class DecoderBlock(nn.Module):
-    def __init__(self,in_channels,out_channels,time_embedding_dim):
+    def __init__(self,in_channels,out_channels,time_embedding_dim,label_embedding_dim):
         super().__init__()
         self.upsample=nn.Upsample(scale_factor=2,mode='bilinear',align_corners=False)
         self.conv0=nn.Sequential(*[ResidualBottleneck(in_channels,in_channels) for i in range(3)],
                                     ResidualBottleneck(in_channels,in_channels//2))
 
         self.time_mlp=TimeMLP(embedding_dim=time_embedding_dim,hidden_dim=in_channels,out_dim=in_channels//2)
+        self.label_mlp=LabelMLP(embedding_dim=time_embedding_dim,hidden_dim=in_channels,out_dim=in_channels//2)
         self.conv1=ResidualBottleneck(in_channels//2,out_channels//2)
 
-    def forward(self,x,x_shortcut,t=None):
+    def forward(self,x,x_shortcut,t=None, label=None):
         x=self.upsample(x)
         x=torch.cat([x,x_shortcut],dim=1)
         x=self.conv0(x)
         if t is not None:
-            x=self.time_mlp(x,t)
-        x=self.conv1(x)
+            x1=self.time_mlp(x,t)
+        else:
+            x1=x
+        if label is not None:
+            x2=self.label_mlp(x,label)
+        else:
+            x2=torch.zeros_like(x)
+        x=self.conv1(x1+x2)
 
         return x        
 
@@ -123,7 +156,7 @@ class Unet(nn.Module):
     '''
     simple unet design without attention
     '''
-    def __init__(self,timesteps,time_embedding_dim,in_channels=3,out_channels=2,base_dim=32,dim_mults=[2,4,8,16]):
+    def __init__(self,timesteps,labels, time_embedding_dim,label_embedding_dim, in_channels=3,out_channels=2,base_dim=32,dim_mults=[2,4,8,16]):
         super().__init__()
         assert isinstance(dim_mults,(list,tuple))
         assert base_dim%2==0 
@@ -132,27 +165,30 @@ class Unet(nn.Module):
 
         self.init_conv=ConvBnSiLu(in_channels,base_dim,3,1,1)
         self.time_embedding=nn.Embedding(timesteps,time_embedding_dim)
+        self.label_embedding=nn.Embedding(labels,label_embedding_dim)
 
-        self.encoder_blocks=nn.ModuleList([EncoderBlock(c[0],c[1],time_embedding_dim) for c in channels])
-        self.decoder_blocks=nn.ModuleList([DecoderBlock(c[1],c[0],time_embedding_dim) for c in channels[::-1]])
+        self.encoder_blocks=nn.ModuleList([EncoderBlock(c[0],c[1],time_embedding_dim, label_embedding_dim) for c in channels])
+        self.decoder_blocks=nn.ModuleList([DecoderBlock(c[1],c[0],time_embedding_dim, label_embedding_dim) for c in channels[::-1]])
     
         self.mid_block=nn.Sequential(*[ResidualBottleneck(channels[-1][1],channels[-1][1]) for i in range(2)],
                                         ResidualBottleneck(channels[-1][1],channels[-1][1]//2))
 
         self.final_conv=nn.Conv2d(in_channels=channels[0][0]//2,out_channels=out_channels,kernel_size=1)
 
-    def forward(self,x,t=None):
+    def forward(self,x,t=None, label=None):
         x=self.init_conv(x)
         if t is not None:
             t=self.time_embedding(t)
+        if label is not None:
+            label=self.label_embedding(label)        
         encoder_shortcuts=[]
         for encoder_block in self.encoder_blocks:
-            x,x_shortcut=encoder_block(x,t)
+            x,x_shortcut=encoder_block(x,t,label)
             encoder_shortcuts.append(x_shortcut)
         x=self.mid_block(x)
         encoder_shortcuts.reverse()
         for decoder_block,shortcut in zip(self.decoder_blocks,encoder_shortcuts):
-            x=decoder_block(x,shortcut,t)
+            x=decoder_block(x,shortcut,t,label)
         x=self.final_conv(x)
 
         return x
@@ -169,6 +205,7 @@ class Unet(nn.Module):
 if __name__=="__main__":
     x=torch.randn(3,3,224,224)
     t=torch.randint(0,1000,(3,))
+    label = torch.randint(0, 10, (3,))
     model=Unet(1000,128)
-    y=model(x,t)
+    y=model(x,t,label)
     print(y.shape)
