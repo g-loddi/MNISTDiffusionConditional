@@ -39,6 +39,8 @@ def parse_args():
     parser.add_argument('--lr',type = float ,default=0.001)
     parser.add_argument('--batch_size',type = int ,default=128)    
     parser.add_argument('--epochs',type = int,default=100)
+    parser.add_argument('--guidance_dropout', type = float, default=0.1)
+    parser.add_argument('--guidance_scale', type = float, default=5.0)
     parser.add_argument('--ckpt',type = str,help = 'define checkpoint path',default='')
     parser.add_argument('--n_samples',type = int,help = 'define sampling amounts after every epoch trained',default=36)
     parser.add_argument('--model_base_dim',type = int,help = 'base dim of Unet',default=64)
@@ -86,7 +88,10 @@ def main(args):
         for j,(image,target) in enumerate(train_dataloader):
             noise=torch.randn_like(image).to(device)
             image=image.to(device)
-            target=target.to(device)
+            if torch.rand(1).item() < args.guidance_dropout:
+                target = None
+            if target is not None:
+                target=target.to(device)
             pred=model(image,noise,target)
             loss=loss_fn(pred,noise)
             loss.backward()
@@ -103,11 +108,13 @@ def main(args):
                 "model_ema":model_ema.state_dict()}
 
         os.makedirs("results",exist_ok=True)
+        os.makedirs("results_images",exist_ok=True)
+
         torch.save(ckpt,"results/steps_{:0>8}.pt".format(global_steps))
 
         model_ema.eval()
-        samples=model_ema.module.sampling(args.n_samples, samples_target = [0,1,2,3,4,5] * 6,clipped_reverse_diffusion=not args.no_clip,device=device)
-        save_image(samples,"results/steps_{:0>8}.png".format(global_steps),nrow=int(math.sqrt(args.n_samples)))
+        samples=model_ema.module.sampling(args.n_samples, samples_target = [0,1,2,3,4,5] * 6,clipped_reverse_diffusion=not args.no_clip,device=device,guidance_scale=args.guidance_scale)
+        save_image(samples,"results_images/steps_{:0>8}.png".format(global_steps),nrow=int(math.sqrt(args.n_samples)))
 
 if __name__=="__main__":
     args=parse_args()

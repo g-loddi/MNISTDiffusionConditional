@@ -10,7 +10,6 @@ class MNISTDiffusion(nn.Module):
         self.timesteps=timesteps
         self.in_channels=in_channels
         self.image_size=image_size
-
         betas=self._cosine_variance_schedule(timesteps)
 
         alphas=1.-betas
@@ -24,7 +23,7 @@ class MNISTDiffusion(nn.Module):
 
         self.model=Unet(timesteps, labels, time_embedding_dim, contex_embedding_dim, in_channels,in_channels,base_dim,dim_mults)
 
-    def forward(self,x,noise,target):
+    def forward(self,x,noise,target=None):
         # x:NCHW
         t=torch.randint(0,self.timesteps,(x.shape[0],)).to(x.device)
         x_t=self._forward_diffusion(x,t,noise)
@@ -33,7 +32,9 @@ class MNISTDiffusion(nn.Module):
         return pred_noise
 
     @torch.no_grad()
-    def sampling(self,n_samples, samples_target, clipped_reverse_diffusion=True,device="cuda"):
+    def sampling(self,n_samples, samples_target,guidance_scale, clipped_reverse_diffusion=True,device="cuda"):
+        
+        self.guidance_scale=guidance_scale
 
         assert n_samples == len(samples_target)
         x_t=torch.randn((n_samples,self.in_channels,self.image_size,self.image_size)).to(device)
@@ -45,9 +46,9 @@ class MNISTDiffusion(nn.Module):
             t=torch.tensor([i for _ in range(n_samples)]).to(device)
 
             if clipped_reverse_diffusion:
-                x_t=self._reverse_diffusion_with_clip(x_t,t,noise,samples_target)
+                x_t=self._reverse_diffusion_with_clip(x_t,t,noise,self.guidance_scale,samples_target)
             else:
-                x_t=self._reverse_diffusion(x_t,t,noise,samples_target)
+                x_t=self._reverse_diffusion(x_t,t,noise,self.guidance_scale,samples_target)
 
         x_t=(x_t+1.)/2. #[-1,1] to [0,1]
 
@@ -68,13 +69,23 @@ class MNISTDiffusion(nn.Module):
 
 
     @torch.no_grad()
-    def _reverse_diffusion(self,x_t,t,noise,target):
+    def _reverse_diffusion(self,x_t,t,noise,guidance_scale,target=None):
         '''
         p(x_{t-1}|x_{t})-> mean,std
 
         pred_noise-> pred_mean and pred_std
         '''
-        pred=self.model(x_t,t,target)
+
+        # Conditional prediction
+        cond_pred = self.model(x_t, t,target)
+
+        # Unconditional prediction
+        uncond_pred = self.model(x_t, t, None)
+
+        # Combine predictions using guidance scale
+        pred = (1 + guidance_scale) * cond_pred - guidance_scale * uncond_pred
+
+        # pred=self.model(x_t,t,target)
 
         alpha_t=self.alphas.gather(-1,t).reshape(x_t.shape[0],1,1,1)
         alpha_t_cumprod=self.alphas_cumprod.gather(-1,t).reshape(x_t.shape[0],1,1,1)
@@ -92,13 +103,24 @@ class MNISTDiffusion(nn.Module):
 
 
     @torch.no_grad()
-    def _reverse_diffusion_with_clip(self,x_t,t,noise,target): 
+    def _reverse_diffusion_with_clip(self,x_t,t,noise,guidance_scale,target=None): 
         '''
         p(x_{0}|x_{t}),q(x_{t-1}|x_{0},x_{t})->mean,std
 
         pred_noise -> pred_x_0 (clip to [-1.0,1.0]) -> pred_mean and pred_std
         '''
-        pred=self.model(x_t,t,target)
+
+      # Conditional prediction
+        cond_pred = self.model(x_t, t,target)
+
+        # Unconditional prediction
+        uncond_pred = self.model(x_t, t, None)
+
+        # Combine predictions using guidance scale
+        pred = (1 + guidance_scale) * cond_pred - guidance_scale * uncond_pred
+
+        # pred=self.model(x_t,t,target)
+
         alpha_t=self.alphas.gather(-1,t).reshape(x_t.shape[0],1,1,1)
         alpha_t_cumprod=self.alphas_cumprod.gather(-1,t).reshape(x_t.shape[0],1,1,1)
         beta_t=self.betas.gather(-1,t).reshape(x_t.shape[0],1,1,1)
